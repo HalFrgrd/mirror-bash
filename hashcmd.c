@@ -1,5 +1,12 @@
 /* hashcmd.c - functions for managing a hash table mapping command names to
-	       full pathnames. */
+	       full pathnames.
+
+   This hash table (hashed_filenames) is populated and consulted during
+   command *execution* (see search_for_command in findcmd.c), not during
+   Tab completion.  When bash executes a command it checks this table first
+   (O(1) lookup) before searching $PATH; if the cached path is stale the
+   entry is removed and $PATH is re-searched.  Tab completion does its own
+   independent, uncached $PATH scan every time. */
 
 /* Copyright (C) 1997-2022 Free Software Foundation, Inc.
 
@@ -88,7 +95,10 @@ phash_remove (const char *filename)
    hash table.  CHECK_DOT if non-null is for future calls to
    phash_search (); it means that this file was found
    in a directory in $PATH that is not an absolute pathname.
-   FOUND is the initial value for times_found. */
+   FOUND is the initial value for times_found.
+   Called by search_for_command() after a successful $PATH lookup so that
+   subsequent executions of the same command name hit the hash table
+   instead of rescanning $PATH. */
 void
 phash_insert (char *filename, char *full_path, int check_dot, int found)
 {
@@ -121,7 +131,10 @@ phash_insert (char *filename, char *full_path, int check_dot, int found)
    is hashed, but (data->flags & HASH_CHKDOT) is non-zero, check
    ./FILENAME and return that if it is executable.  This always
    returns a newly-allocated string; the caller is responsible
-   for freeing it. */
+   for freeing it.
+   The caller (search_for_command) is responsible for validating the
+   returned path with file_status() and calling phash_remove() if it is
+   no longer executable, so that stale entries do not accumulate. */
 char *
 phash_search (const char *filename)
 {

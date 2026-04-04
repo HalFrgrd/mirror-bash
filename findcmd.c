@@ -343,7 +343,19 @@ get_next_path_element (char *path_list, int *path_index_pointer)
    PATHNAME found in $PATH into the command hash table.
    If (FLAGS&CMDSRCH_STDPATH) is non-zero, we are running in a `command -p'
    environment and should use the Posix standard path.
-   Returns a newly-allocated string. */
+   Returns a newly-allocated string.
+
+   Execution-time command lookup flow:
+     1. If hashing_enabled and PATH is not temporarily overridden, call
+        phash_search() for an O(1) hash-table lookup.
+     2. If the cached path is stale (file no longer executable), remove the
+        entry with phash_remove() and fall through to step 3.
+     3. Search every directory in $PATH via find_user_command_in_path().
+     4. On success, store the result with phash_insert() so future lookups
+        skip the $PATH scan.
+   Note: this hash table is consulted only during command *execution*, not
+   during Tab completion (see command_word_completion_function in bashline.c,
+   which always rescans $PATH). */
 char *
 search_for_command (const char *pathname, int flags)
 {

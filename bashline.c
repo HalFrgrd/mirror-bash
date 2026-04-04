@@ -1582,7 +1582,19 @@ invalid_completion (const char *text, int ind)
 }
 
 /* Do some completion on TEXT.  The indices of TEXT in RL_LINE_BUFFER are
-   at START and END.  Return an array of matches, or NULL if none. */
+   at START and END.  Return an array of matches, or NULL if none.
+
+   First-word (command position) detection: if START is preceded only by
+   whitespace, or by an unquoted command-separator character (;  |  &  (  )
+   newline), the cursor is considered to be in "command position".  In that
+   case bash delegates to command_word_completion_function, which searches
+   (in order): aliases, reserved words, shell functions, shell builtins, and
+   finally every directory listed in $PATH.  There is no completion cache:
+   the PATH directories are re-scanned on every Tab press.
+
+   Programmable completions (set via "complete -F/-C") are checked before
+   the default command-word logic; if a compspec matches the current command,
+   its results are used exclusively. */
 static char **
 attempt_shell_completion (const char *text, int start, int end)
 {
@@ -2000,7 +2012,23 @@ executable_completion (const char *filename, int searching_path)
 /* This is the function to call when the word to complete is in a position
    where a command word can be found.  It grovels $PATH, looking for commands
    that match.  It also scans aliases, function names, and the shell_builtin
-   table. */
+   table.
+
+   Completion order (mapping_over state machine):
+     0  aliases       (all_aliases)
+     1  reserved words (word_token_alist)
+     2  shell functions (all_visible_functions)
+     3  shell builtins  (shell_builtins[])
+     4+ every directory in $PATH, in order
+
+   PATH search: for each colon-separated element of $PATH, readline's
+   rl_filename_completion_function enumerates files whose names begin with
+   hint_text; only entries for which executable_file() returns true are
+   returned.  The full $PATH is re-read and re-scanned on every call with
+   state==0 (i.e. on every new Tab press).  There is NO completion-time
+   cache: unlike command execution (see search_for_command in findcmd.c,
+   which consults the hashed_filenames table), Tab completion always does a
+   fresh directory scan. */
 char *
 command_word_completion_function (const char *hint_text, int state)
 {
@@ -2136,6 +2164,9 @@ command_word_completion_function (const char *hint_text, int state)
 
       orig_found_quote = rl_completion_found_quote;
 
+      /* Re-read $PATH on every new Tab press (state==0).  There is no
+	 completion cache: the list of directories is not saved between
+	 calls, so every Tab invocation rescans the filesystem. */
       path = path_value ("PATH", 0);
       path_index = dot_in_path = 0;
 
@@ -2290,7 +2321,9 @@ globword:
     
   /* Repeatedly call filename_completion_function while we have
      members of PATH left.  Question:  should we stat each file?
-     Answer: we call executable_file () on each file. */
+     Answer: we call executable_file () on each file.
+     Note: this loop is entered fresh on every Tab press; results are not
+     cached between calls to this function. */
  outer:
 
   istate = (val != (char *)NULL);
