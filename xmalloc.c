@@ -87,6 +87,8 @@ allocerr (const char *func, size_t bytes)
 #endif /* !HAVE_SBRK */
 }
 
+#include "bash_alloc_guard.h"
+
 /* Return a pointer to free()able block of memory large enough
    to hold BYTES number of bytes.  If the memory cannot be allocated,
    print an error message and abort. */
@@ -94,6 +96,8 @@ PTR_T
 xmalloc (size_t bytes)
 {
   PTR_T temp;
+
+  bash_allocator_guard_enter("xmalloc");
 
 #if defined (DEBUG)
   if (bytes == 0)
@@ -106,6 +110,7 @@ xmalloc (size_t bytes)
   if (temp == 0)
     allocerr ("xmalloc", bytes);
 
+  bash_allocator_guard_exit();
   return (temp);
 }
 
@@ -113,6 +118,8 @@ PTR_T
 xrealloc (PTR_T pointer, size_t bytes)
 {
   PTR_T temp;
+
+  bash_allocator_guard_enter("xrealloc");
 
 #if defined (DEBUG)
   if (bytes == 0)
@@ -125,6 +132,7 @@ xrealloc (PTR_T pointer, size_t bytes)
   if (temp == 0)
     allocerr ("xrealloc", bytes);
 
+  bash_allocator_guard_exit();
   return (temp);
 }
 
@@ -149,8 +157,10 @@ xreallocarray (PTR_T ptr, size_t nmemb, size_t size)
 void
 xfree (PTR_T string)
 {
+  bash_allocator_guard_enter("xfree");
   if (string)
     free (string);
+  bash_allocator_guard_exit();
 }
 
 #ifdef USING_BASH_MALLOC
@@ -172,6 +182,8 @@ sh_xmalloc (size_t bytes, char *file, int line)
 {
   PTR_T temp;
 
+  bash_allocator_guard_enter("sh_xmalloc");
+
 #if defined (DEBUG)
   if (bytes == 0)
     internal_warning("xmalloc: %s:%d: size argument is 0", file, line);
@@ -183,6 +195,7 @@ sh_xmalloc (size_t bytes, char *file, int line)
   if (temp == 0)
     sh_allocerr ("xmalloc", bytes, file, line);
 
+  bash_allocator_guard_exit();
   return (temp);
 }
 
@@ -190,6 +203,8 @@ PTR_T
 sh_xrealloc (PTR_T pointer, size_t bytes, char *file, int line)
 {
   PTR_T temp;
+
+  bash_allocator_guard_enter("sh_xrealloc");
 
 #if defined (DEBUG)
   if (bytes == 0)
@@ -202,6 +217,7 @@ sh_xrealloc (PTR_T pointer, size_t bytes, char *file, int line)
   if (temp == 0)
     sh_allocerr ("xrealloc", bytes, file, line);
 
+  bash_allocator_guard_exit();
   return (temp);
 }
 
@@ -219,7 +235,9 @@ sh_xreallocarray (PTR_T ptr, size_t nmemb, size_t size, char *file, int line)
 void
 sh_xfree (PTR_T string, char *file, int line)
 {
+  bash_allocator_guard_enter("sh_xfree");
   if (string)
     sh_free (string, file, line);
+  bash_allocator_guard_exit();
 }
 #endif

@@ -30,7 +30,7 @@
  * This is a very fast storage allocator.  It allocates blocks of a small 
  * number of different sizes, and keeps free lists of each size.  Blocks
  * that don't exactly fit are passed up to the next larger size.  In this 
- * implementation, the available sizes are (2^n)-4 (or -16) bytes long.
+ * implementation , the available sizes are (2^n)-4 (or -16) bytes long.
  * This is designed for use in a program that uses vast quantities of
  * memory, but bombs when it runs out.  To make it a little better, it
  * warns the user when he starts to get near the end.
@@ -100,6 +100,61 @@
 #endif
 
 #include "imalloc.h"
+#include "bash_alloc_guard.h"
+
+_Atomic pid_t g_bash_allocator_owner_tid = 0;
+_Thread_local int g_bash_allocator_recursion_depth = 0;
+static _Thread_local pid_t g_cached_tid = 0;
+
+void bash_allocator_guard_enter(const char *func_name) {
+    if (__builtin_expect(g_bash_allocator_recursion_depth > 0, 1)) {
+        g_bash_allocator_recursion_depth++;
+        return;
+    }
+
+    if (__builtin_expect(g_cached_tid == 0, 0)) {
+        g_cached_tid = (pid_t)syscall(SYS_gettid);
+    }
+    pid_t tid = g_cached_tid;
+
+    pid_t expected = 0;
+    if (!atomic_compare_exchange_strong(&g_bash_allocator_owner_tid, &expected, tid)) {
+        g_bash_allocator_recursion_depth = 999;
+
+        fprintf(stderr, "\r\n=================================================================\r\n");
+        fprintf(stderr, "[FATAL HARDENED BASH] BASH ALLOCATOR CONCURRENCY VIOLATION DETECTED!\r\n");
+        fprintf(stderr, "Function '%s' called on Thread %d, but Thread %d is currently inside the Bash allocator!\r\n",
+                func_name, (int)tid, (int)expected);
+        fprintf(stderr, "=================================================================\r\n");
+        
+        void *buffer[128];
+        int nptrs = backtrace(buffer, 128);
+        fprintf(stderr, "Stack trace for violating Thread %d:\r\n", (int)tid);
+        char **symbols = backtrace_symbols(buffer, nptrs);
+        if (symbols) {
+            for (int i = 0; i < nptrs; i++) {
+                fprintf(stderr, "  #%-2d %s\r\n", i, symbols[i]);
+            }
+            free(symbols);
+        } else {
+            backtrace_symbols_fd(buffer, nptrs, STDERR_FILENO);
+        }
+        fprintf(stderr, "=================================================================\r\n\r\n");
+        fflush(stderr);
+        abort();
+    }
+    g_bash_allocator_recursion_depth = 1;
+}
+
+void bash_allocator_guard_exit(void) {
+    if (g_bash_allocator_recursion_depth > 0) {
+        g_bash_allocator_recursion_depth--;
+        if (g_bash_allocator_recursion_depth == 0) {
+            atomic_store(&g_bash_allocator_owner_tid, 0);
+        }
+    }
+}
+
 #ifdef MALLOC_STATS
 #  include "mstats.h"
 #endif
@@ -817,13 +872,19 @@ internal_malloc (size_t n, const char *file, int line, int flags)
   register char *m, *z;
   MALLOC_SIZE_T nbytes;
   mguard_t mg;
+  PTR_T ret_val;
+
+  bash_allocator_guard_enter("internal_malloc");
 
   /* Get the system page size and align break pointer so future sbrks will
      be page-aligned.  The page size must be at least 1K -- anything
      smaller is increased. */
   if (pagesz == 0)
     if (pagealign () < 0)
-      return ((PTR_T)NULL);
+      {
+        ret_val = ((PTR_T)NULL);
+        goto internal_malloc_out;
+      }
  
   /* Figure out how many bytes are required, rounding up to the nearest
      multiple of 8, then figure out which nextf[] area to use.  Try to
@@ -831,7 +892,10 @@ internal_malloc (size_t n, const char *file, int line, int flags)
      needed is greater than the page size, we can start at pagebucket. */
 #if SIZEOF_SIZE_T == 8
   if (ALLOCATED_BYTES(n) > MAXALLOC_SIZE)
-    return ((PTR_T) NULL);
+    {
+      ret_val = ((PTR_T)NULL);
+      goto internal_malloc_out;
+    }
 #endif
   nbytes = ALLOCATED_BYTES(n);
   nunits = (nbytes <= (pagesz >> 1)) ? STARTBUCK : pagebucket;
@@ -841,7 +905,10 @@ internal_malloc (size_t n, const char *file, int line, int flags)
 
   /* Silently reject too-large requests. XXX - can increase this if HAVE_MMAP */
   if (nunits >= NBUCKETS)
-    return ((PTR_T) NULL);
+    {
+      ret_val = ((PTR_T)NULL);
+      goto internal_malloc_out;
+    }
 
   /* In case this is reentrant use of malloc from signal handler,
      pick a block size that no other malloc level is currently
@@ -864,7 +931,8 @@ internal_malloc (size_t n, const char *file, int line, int flags)
   if ((p = nextf[nunits]) == NULL)
     {
       busy[nunits] = 0;
-      return NULL;
+      ret_val = NULL;
+      goto internal_malloc_out;
     }
   nextf[nunits] = CHAIN (p);
   busy[nunits] = 0;
@@ -925,7 +993,11 @@ internal_malloc (size_t n, const char *file, int line, int flags)
 	file ? file : _("unknown"), line, p->mh_nbytes, MALIGN_MASK+1);
 #endif
 
-  return (PTR_T) (p + 1);
+  ret_val = (PTR_T) (p + 1);
+
+internal_malloc_out:
+  bash_allocator_guard_exit();
+  return ret_val;
 }
 
 static void
@@ -938,8 +1010,10 @@ internal_free (PTR_T mem, const char *file, int line, int flags)
   MALLOC_SIZE_T ubytes;		/* caller-requested size */
   mguard_t mg;
 
+  bash_allocator_guard_enter("internal_free");
+
   if ((ap = (char *)mem) == 0)
-    return;
+    goto internal_free_out;
 
   p = (union mhead *) ap - 1;
 
@@ -1073,6 +1147,9 @@ free_return:
   if (_malloc_nwatch > 0)
     _malloc_ckwatch (mem, file, line, W_FREE, ubytes);
 #endif
+
+internal_free_out:
+  bash_allocator_guard_exit();
 }
 
 #if USE_MREMAP == 1
@@ -1132,6 +1209,9 @@ internal_realloc (PTR_T mem, size_t n, const char *file, int line, int flags)
   register int newunits, nunits;
   register char *m, *z;
   mguard_t mg;
+  PTR_T ret_val;
+
+  bash_allocator_guard_enter("internal_realloc");
 
 #ifdef MALLOC_STATS
   _mstats.nrealloc++;
@@ -1141,10 +1221,14 @@ internal_realloc (PTR_T mem, size_t n, const char *file, int line, int flags)
     {
       internal_free (mem, file, line, MALLOC_INTERNAL);
       /* XXX - return internal_malloc (0, file, line MALLOC_INTERNAL) ? */
-      return (NULL);
+      ret_val = NULL;
+      goto internal_realloc_out;
     }
   if ((p = (union mhead *) mem) == 0)
-    return internal_malloc (n, file, line, MALLOC_INTERNAL);
+    {
+      ret_val = internal_malloc (n, file, line, MALLOC_INTERNAL);
+      goto internal_realloc_out;
+    }
 
   p--;
   nunits = p->mh_index;
@@ -1193,11 +1277,17 @@ internal_realloc (PTR_T mem, size_t n, const char *file, int line, int flags)
 
   /* If we're reallocating to the same size as previously, return now */
   if (n == p->mh_nbytes)
-    return mem;
+    {
+      ret_val = mem;
+      goto internal_realloc_out;
+    }
 
 #if SIZEOF_SIZE_T == 8
   if (ALLOCATED_BYTES(n) > MAXALLOC_SIZE)
-    return ((PTR_T) NULL);
+    {
+      ret_val = ((PTR_T) NULL);
+      goto internal_realloc_out;
+    }
 #endif
   /* See if desired size rounds to same power of 2 as actual size. */
   nbytes = ALLOCATED_BYTES(n);
@@ -1215,7 +1305,8 @@ internal_realloc (PTR_T mem, size_t n, const char *file, int line, int flags)
       z = mg.s;
       *m++ = *z++, *m++ = *z++, *m++ = *z++, *m++ = *z++;      
 
-      return mem;
+      ret_val = mem;
+      goto internal_realloc_out;
     }
 
   if (n < tocopy)
@@ -1234,19 +1325,25 @@ internal_realloc (PTR_T mem, size_t n, const char *file, int line, int flags)
     newunits = (nbytes <= (pagesz >> 1)) ? STARTBUCK : pagebucket;
   for ( ; newunits < NBUCKETS; newunits++)
     if (nbytes <= binsize(newunits))
-     break;
+      break;
 
   if (nunits > malloc_mmap_threshold && newunits > malloc_mmap_threshold)
     {
       m = internal_remap (mem, n, newunits, MALLOC_INTERNAL);
       if (m == 0)
-        return 0;
+        {
+          ret_val = 0;
+          goto internal_realloc_out;
+        }
     }
   else
 #endif /* USE_MREMAP */
     {
   if ((m = internal_malloc (n, file, line, MALLOC_INTERNAL|MALLOC_NOTRACE|MALLOC_NOREG)) == 0)
-    return 0;
+    {
+      ret_val = 0;
+      goto internal_realloc_out;
+    }
   FASTCOPY (mem, m, tocopy);
   internal_free (mem, file, line, MALLOC_INTERNAL);
     }
@@ -1268,7 +1365,11 @@ internal_realloc (PTR_T mem, size_t n, const char *file, int line, int flags)
     _malloc_ckwatch (m, file, line, W_RESIZED, n);
 #endif
 
-  return m;
+  ret_val = m;
+
+internal_realloc_out:
+  bash_allocator_guard_exit();
+  return ret_val;
 }
 
 static PTR_T
